@@ -1,175 +1,244 @@
-# snake.py
-import sys, random, pygame
+# smooth_snake.py
+import sys, random, copy, pygame
 
-# ------------------ Config ------------------
-CELL       = 16                 # pixel size of one grid cell
-GRID_W     = 46                 # number of columns
-GRID_H     = 26                 # number of rows
-BORDER     = 10                 # outer frame thickness (pixels)
-FPS_START  = 10                 # initial speed
-FPS_STEP   = 0.25               # speed up per food eaten
+# ===================== Config =====================
+CELL       = 22                   # size of a grid cell in pixels
+GRID_W     = 42                   # columns
+GRID_H     = 24                   # rows
+BORDER     = 12                   # outer frame thickness
 WINDOW_W   = GRID_W * CELL + BORDER * 2
 WINDOW_H   = GRID_H * CELL + BORDER * 2
 
-# Colors
-BLACK      = (0, 0, 0)
-INK        = (10, 36, 52)       # dark blue-ish frame (like screenshot)
-GREEN      = (80, 220, 60)
-GREEN_DARK = (40, 180, 30)
-RED        = (220, 40, 40)
-WHITE      = (240, 240, 240)
+SNAKE_LEN0 = 6                    # starting length
+SPEED      = 6.0                  # cells per second (base)
+SPEED_GAIN = 0.10                 # add per fruit eaten
+MAX_SPEED  = 12.0
 
-# ------------------ Helpers ------------------
-def grid_to_px(col, row):
-    """Convert grid coords to pixel rect (x, y, w, h)."""
+# Colors
+INK        = (10, 36, 52)
+BOARD      = (0, 0, 0)
+HEAD_COL   = (120, 255, 90)
+BODY_COL   = (70, 210, 60)
+HUD        = (240, 240, 240)
+
+# ===================== Helpers =====================
+def cell_rect(col, row):
     x = BORDER + col * CELL
     y = BORDER + row * CELL
     return pygame.Rect(x, y, CELL, CELL)
 
-def random_open_cell(occupied):
-    """Pick a random free cell not in occupied set."""
-    while True:
-        c = random.randrange(GRID_W)
-        r = random.randrange(GRID_H)
-        if (c, r) not in occupied:
-            return (c, r)
+def clamp(v, a, b): return a if v < a else b if v > b else v
 
-# ------------------ Game Objects ------------------
+# ===================== Fruits ======================
+FRUITS = ("apple", "cherry", "lemon", "grape")
+
+def draw_fruit(surf, kind, col, row):
+    """Simple procedural fruit sprites."""
+    r = cell_rect(col, row)
+    cx, cy = r.center
+    # shrink to avoid touching cell edges
+    radius = int(CELL * 0.38)
+
+    if kind == "apple":
+        # body
+        pygame.draw.circle(surf, (220, 40, 40), (cx, cy), radius)
+        # highlight
+        pygame.draw.circle(surf, (255, 120, 120), (cx - radius//3, cy - radius//3), radius//3)
+        # stem
+        pygame.draw.line(surf, (90, 60, 20), (cx, cy - radius), (cx, cy - radius - 6), 3)
+        # leaf
+        pygame.draw.circle(surf, (40, 170, 70), (cx + 6, cy - radius - 2), 5)
+
+    elif kind == "cherry":
+        # two cherries
+        pygame.draw.circle(surf, (210, 20, 50), (cx - 6, cy), radius-3)
+        pygame.draw.circle(surf, (210, 20, 50), (cx + 8, cy - 4), radius-3)
+        # stems
+        pygame.draw.line(surf, (90, 60, 20), (cx - 6, cy - (radius-3)), (cx + 3, cy - radius - 8), 2)
+        pygame.draw.line(surf, (90, 60, 20), (cx + 8, cy - (radius-3) - 4), (cx + 3, cy - radius - 8), 2)
+        # leaf
+        pygame.draw.circle(surf, (40, 170, 70), (cx + 8, cy - radius - 8), 5)
+
+    elif kind == "lemon":
+        # oval
+        lemon_rect = pygame.Rect(0,0, int(radius*2.1), int(radius*1.4))
+        lemon_rect.center = (cx, cy)
+        pygame.draw.ellipse(surf, (245, 210, 60), lemon_rect)
+        # highlight
+        hi = lemon_rect.copy(); hi.inflate_ip(-lemon_rect.w*0.55, -lemon_rect.h*0.55)
+        pygame.draw.ellipse(surf, (255, 245, 140), hi)
+        # stem/leaf
+        pygame.draw.line(surf, (90,60,20), (cx, lemon_rect.top), (cx, lemon_rect.top-5), 2)
+        pygame.draw.circle(surf, (40,170,70), (cx+6, lemon_rect.top-5), 5)
+
+    else: # grape
+        # cluster
+        purple = (150, 50, 200)
+        offsets = [(-6,2),(0,0),(6,2),(-3,8),(3,8),(0,14)]
+        for ox, oy in offsets:
+            pygame.draw.circle(surf, purple, (cx+ox, cy+oy), radius-8)
+        # leaf
+        pygame.draw.circle(surf, (40,170,70), (cx-2, cy - radius - 3), 5)
+        pygame.draw.line(surf, (90,60,20), (cx-2, cy - radius - 3), (cx, cy - 10), 2)
+
+# ================== Snake (grid logic + smooth draw) ==================
 class Snake:
     def __init__(self):
-        midx = GRID_W // 4
-        midy = GRID_H // 2
-        self.body = [(midx + i, midy) for i in range(3, -1, -1)]  # head = body[0]
-        self.dir = (1, 0)  # moving right
+        my = GRID_H // 2
+        mx = GRID_W // 3
+        self.cells = [(mx - i, my) for i in range(SNAKE_LEN0)]  # [head,...,tail]
+        self.prev_cells = copy.deepcopy(self.cells)             # for interpolation
+        self.dir = (1, 0)                                      # moving right
         self.grow = 0
 
-    def head(self):
-        return self.body[0]
+    def head(self): return self.cells[0]
 
-    def set_dir(self, newdir):
-        # Prevent immediate 180° turns
-        if (newdir[0] == -self.dir[0] and newdir[1] == -self.dir[1]):
+    def set_dir(self, d):
+        # block immediate reversal
+        if (d[0] == -self.dir[0] and d[1] == -self.dir[1]):
             return
-        self.dir = newdir
+        # also prevent changing axis twice in one tick (feels more natural)
+        self.dir = d
 
     def step(self):
-        hx, hy = self.head()
+        hx, hy = self.cells[0]
         nx, ny = hx + self.dir[0], hy + self.dir[1]
-        new_head = (nx, ny)
 
-        # Collision with walls?
+        # wall collision
         if nx < 0 or nx >= GRID_W or ny < 0 or ny >= GRID_H:
-            return False  # dead
-
-        # Collision with itself?
-        if new_head in self.body:
             return False
 
-        self.body.insert(0, new_head)
+        # self collision
+        if (nx, ny) in self.cells:
+            return False
+
+        self.prev_cells = copy.deepcopy(self.cells)  # for smooth draw
+        self.cells.insert(0, (nx, ny))
         if self.grow > 0:
             self.grow -= 1
         else:
-            self.body.pop()
+            self.cells.pop()
         return True
 
-    def eat(self):
-        self.grow += 1
+    def eat(self): self.grow += 1
 
-    def draw(self, surf):
-        # Draw body with a bright head and darker body + subtle inner highlight
-        for i, (x, y) in enumerate(self.body):
-            rect = grid_to_px(x, y)
-            color = GREEN if i == 0 else GREEN_DARK
-            pygame.draw.rect(surf, color, rect)
-            inner = rect.inflate(-4, -4)
-            pygame.draw.rect(surf, (0, 0, 0), inner, width=0)  # inner black for pixelated look
-            inner2 = rect.inflate(-6, -6)
-            pygame.draw.rect(surf, color, inner2, width=0)
+    def draw_smooth(self, surf, t):
+        """t in [0,1]: interpolate from prev_cells -> cells."""
+        # Rounded rectangles for segments, brighter head
+        for idx in range(len(self.cells)):
+            # for the tail, prev list may be longer when growing; guard indexes
+            if idx >= len(self.prev_cells):
+                a = self.cells[idx]
+                b = a
+            else:
+                a = self.prev_cells[idx]
+                b = self.cells[idx]
 
-# ------------------ Main Game ------------------
+            x = (1-t)*a[0] + t*b[0]
+            y = (1-t)*a[1] + t*b[1]
+            rect = cell_rect(x, y)  # accept floats
+
+            # draw rounded pill
+            color = HEAD_COL if idx == 0 else BODY_COL
+            pygame.draw.rect(surf, color, rect, border_radius=int(CELL*0.3))
+            # subtle inner shade
+            inner = rect.inflate(-6, -6)
+            pygame.draw.rect(surf, (0,0,0), inner, border_radius=int(CELL*0.25))
+
+def cell_rect(colf, rowf):
+    """Float-friendly rect for smooth interpolation."""
+    x = BORDER + colf * CELL
+    y = BORDER + rowf * CELL
+    return pygame.Rect(int(x), int(y), CELL, CELL)
+
+# ===================== Game Loop =====================
 def run():
     pygame.init()
-    pygame.display.set_caption("Snake")
+    pygame.display.set_caption("Smooth Snake")
     screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas,menlo,monaco,dejavusansmono", 18, bold=True)
 
-    def new_round():
+    def new_game():
         snake = Snake()
-        occupied = set(snake.body)
-        food = random_open_cell(occupied)
-        fps = FPS_START
+        occupied = set(snake.cells)
+        food_pos = random_free_cell(occupied)
+        food_kind = random.choice(FRUITS)
+        speed = SPEED
         score = 0
-        paused = False
         alive = True
-        return snake, food, fps, score, paused, alive
+        paused = False
+        # smooth mover
+        prog = 0.0    # progress 0..1 between steps
+        return snake, food_pos, food_kind, speed, score, alive, paused, prog
 
-    snake, food, fps, score, paused, alive = new_round()
+    def random_free_cell(blocked):
+        while True:
+            c = random.randrange(GRID_W)
+            r = random.randrange(GRID_H)
+            if (c, r) not in blocked:
+                return (c, r)
+
+    snake, food_pos, food_kind, speed, score, alive, paused, prog = new_game()
 
     while True:
-        # -------- events ----------
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
-            if e.type == pygame.KEYDOWN:
-                if e.key in (pygame.K_ESCAPE, pygame.K_q):
-                    pygame.quit(); sys.exit()
-                if e.key == pygame.K_p:
-                    paused = not paused
-                if not alive and e.key == pygame.K_r:
-                    snake, food, fps, score, paused, alive = new_round()
-                # movement
-                if e.key in (pygame.K_LEFT, pygame.K_a):
-                    snake.set_dir((-1, 0))
-                elif e.key in (pygame.K_RIGHT, pygame.K_d):
-                    snake.set_dir((1, 0))
-                elif e.key in (pygame.K_UP, pygame.K_w):
-                    snake.set_dir((0, -1))
-                elif e.key in (pygame.K_DOWN, pygame.K_s):
-                    snake.set_dir((0, 1))
+        dt = clock.tick(120) / 1000.0  # high FPS for smoothness
 
-        # -------- update ----------
+        # ---- events ----
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT: pygame.quit(); sys.exit()
+            if e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_ESCAPE, pygame.K_q): pygame.quit(); sys.exit()
+                if e.key == pygame.K_p: paused = not paused
+                if not alive and e.key == pygame.K_r:
+                    snake, food_pos, food_kind, speed, score, alive, paused, prog = new_game()
+                # movement
+                if e.key in (pygame.K_LEFT, pygame.K_a):  snake.set_dir((-1, 0))
+                if e.key in (pygame.K_RIGHT, pygame.K_d): snake.set_dir((1, 0))
+                if e.key in (pygame.K_UP, pygame.K_w):    snake.set_dir((0, -1))
+                if e.key in (pygame.K_DOWN, pygame.K_s):  snake.set_dir((0, 1))
+
+        # ---- update ----
         if alive and not paused:
-            if not snake.step():
-                alive = False
-            else:
+            prog += speed * dt  # cells per second
+            while prog >= 1.0:
+                prog -= 1.0
+                if not snake.step():
+                    alive = False
+                    break
                 # eat?
-                if snake.head() == food:
+                if snake.head() == food_pos:
                     snake.eat()
                     score += 1
-                    fps = min(60, FPS_START + score * FPS_STEP)
-                    occupied = set(snake.body)
-                    food = random_open_cell(occupied)
+                    speed = clamp(speed + SPEED_GAIN, SPEED, MAX_SPEED)
+                    occupied = set(snake.cells)
+                    food_pos = random_free_cell(occupied)
+                    food_kind = random.choice(FRUITS)
 
-        # -------- draw ----------
-        screen.fill(INK)  # frame
-        # board area
-        board_rect = pygame.Rect(BORDER, BORDER, GRID_W * CELL, GRID_H * CELL)
-        pygame.draw.rect(screen, BLACK, board_rect)
+        # ---- draw ----
+        screen.fill(INK)
+        board_rect = pygame.Rect(BORDER, BORDER, GRID_W*CELL, GRID_H*CELL)
+        pygame.draw.rect(screen, BOARD, board_rect)
 
-        # food
-        pygame.draw.rect(screen, RED, grid_to_px(*food))
+        # fruit
+        draw_fruit(screen, food_kind, *food_pos)
 
-        # snake
-        snake.draw(screen)
+        # snake (smooth interpolation)
+        snake.draw_smooth(screen, prog if (alive and not paused) else 0.0)
 
-        # hud
-        txt = f"Score: {score}    Speed: {fps:.1f} FPS"
-        surf = font.render(txt, True, WHITE)
-        screen.blit(surf, (BORDER, 4))
-
+        # HUD
+        hud = font.render(f"Score: {score}   Speed: {speed:.1f}", True, HUD)
+        screen.blit(hud, (BORDER, 4))
         if paused:
-            pmsg = font.render("PAUSED (P to resume)", True, WHITE)
-            screen.blit(pmsg, (WINDOW_W // 2 - pmsg.get_width() // 2, 4))
-
+            p = font.render("PAUSED (P to resume)", True, HUD)
+            screen.blit(p, (WINDOW_W//2 - p.get_width()//2, 4))
         if not alive:
-            g1 = font.render("GAME OVER", True, WHITE)
-            g2 = font.render("Press R to restart  •  Esc to quit", True, WHITE)
-            screen.blit(g1, (WINDOW_W // 2 - g1.get_width() // 2, WINDOW_H // 2 - 20))
-            screen.blit(g2, (WINDOW_W // 2 - g2.get_width() // 2, WINDOW_H // 2 + 6))
+            g1 = font.render("GAME OVER", True, HUD)
+            g2 = font.render("Press R to restart • Esc to quit", True, HUD)
+            screen.blit(g1, (WINDOW_W//2 - g1.get_width()//2, WINDOW_H//2 - 16))
+            screen.blit(g2, (WINDOW_W//2 - g2.get_width()//2, WINDOW_H//2 + 10))
 
         pygame.display.flip()
-        clock.tick(fps if alive and not paused else 60)
 
 if __name__ == "__main__":
     run()
