@@ -22,7 +22,12 @@ BODY_COL   = (70, 210, 60)
 HUD        = (240, 240, 240)
 
 # ===================== Helpers =====================
+def cell_rect(col, row):
+    x = BORDER + col * CELL
+    y = BORDER + row * CELL
+    return pygame.Rect(x, y, CELL, CELL)
 
+def clamp(v, a, b): return a if v < a else b if v > b else v
 
 # ===================== Fruits ======================
 FRUITS = ("apple", "cherry", "lemon", "grape")
