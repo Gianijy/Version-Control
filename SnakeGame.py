@@ -172,17 +172,6 @@ def run():
         prog = 0.0    # progress 0..1 between steps
         return snake, food_pos, food_kind, speed, score, alive, paused, prog
 
-    def random_free_cell(blocked):
-        while True:
-            c = random.randrange(GRID_W)
-            r = random.randrange(GRID_H)
-            if (c, r) not in blocked:
-                return (c, r)
-
-    snake, food_pos, food_kind, speed, score, alive, paused, prog = new_game()
-
-    while True:
-        dt = clock.tick(120) / 1000.0  # high FPS for smoothness
 
         # ---- events ----
         for e in pygame.event.get():
